@@ -61,7 +61,7 @@
 
 #include <float.h>
 #include <mathlib/mathlib.h>
-#include <systemlib/mavlink_log.h>
+#include <stdio.h>
 
 #include <controllib/blocks.hpp>
 
@@ -124,6 +124,8 @@ private:
 	vehicle_local_position_setpoint_s	_local_pos_sp{};		/**< vehicle local position setpoint */
 	home_position_s				_home_pos{}; 				/**< home position */
     obstacle_distance_s         _obstacle_distance{};       /**< obstacle distance */
+
+    matrix::Vector2f _resultantObjectAvoidanceThrust;
 
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::MPC_TKO_RAMP_T>) _takeoff_ramp_time, /**< time constant for smooth takeoff ramp */
@@ -373,6 +375,76 @@ MulticopterPositionControl::poll_subscriptions()
 
     if (updated) {
         orb_copy(ORB_ID(obstacle_distance), _obstacle_distance_sub, &_obstacle_distance);
+        // TODO if _obstacle_distance ~ .isValid()
+
+        // angular width in degrees of each segment
+        //_obstacle_distance.increment;
+
+        // do SUM in double, to avoid possible overflows
+        // NE
+
+        _resultantObjectAvoidanceThrust(0) = 0.f;
+        _resultantObjectAvoidanceThrust(1) = 0.f;
+        float summedAngleOfValidSegmentsInRad = 0.f;
+
+        float segmentWidthInRad = math::radians((float)_obstacle_distance.increment);
+
+
+
+        for (int i = 0; i < 72; ++i) {
+            if (_obstacle_distance.distances[i] == UINT16_MAX) {
+                break; // END REACHED
+            }
+
+            if (_obstacle_distance.distances[i] <= _obstacle_distance.min_distance ||
+                    _obstacle_distance.distances[i] <= 40 || // QUICK FIX
+                    _obstacle_distance.distances[i] >= _obstacle_distance.max_distance) {
+                // skip invalid element
+                continue;
+            }
+
+            // VALID SEGMENT
+            summedAngleOfValidSegmentsInRad += segmentWidthInRad;
+
+//            _resultantObjectAvoidanceThrust(0) += -cosf(_states.yaw + i*segmentWidthInRad) * (_obstacle_distance.max_distance - _obstacle_distance.distances[i]) * segmentWidthInRad;
+//            _resultantObjectAvoidanceThrust(1) += -sinf(_states.yaw + i*segmentWidthInRad) * (_obstacle_distance.max_distance - _obstacle_distance.distances[i]) * segmentWidthInRad;
+            _resultantObjectAvoidanceThrust(0) += 100000.f * -cosf(_states.yaw + i*segmentWidthInRad) / _obstacle_distance.distances[i] * segmentWidthInRad;
+            _resultantObjectAvoidanceThrust(1) += 100000.f * sinf(_states.yaw + i*segmentWidthInRad) / _obstacle_distance.distances[i] * segmentWidthInRad;
+        }
+
+
+        const float OBJECT_AVOIDANCE_THRUST_GAIN = 1.5f / (_obstacle_distance.max_distance);
+
+        if (summedAngleOfValidSegmentsInRad >= segmentWidthInRad) {
+            _resultantObjectAvoidanceThrust(0) *= OBJECT_AVOIDANCE_THRUST_GAIN / summedAngleOfValidSegmentsInRad;
+            _resultantObjectAvoidanceThrust(1) *= OBJECT_AVOIDANCE_THRUST_GAIN / summedAngleOfValidSegmentsInRad;
+
+
+            float angle = atan2(-_resultantObjectAvoidanceThrust(1), -_resultantObjectAvoidanceThrust(0));
+
+            angle = math::degrees(angle);
+
+            char buffer[1024];
+            sprintf(buffer, "OOD at %.1f, THRUST: (%.3f, %.3f), YAW: %.1f, INPUTS: ",
+                    static_cast<double>(angle), static_cast<double>(_resultantObjectAvoidanceThrust(0)), static_cast<double>(_resultantObjectAvoidanceThrust(1)),
+                    static_cast<double>(math::degrees(_states.yaw)));
+
+            for (int i = 0; i < 72; ++i) {
+                if (_obstacle_distance.distances[i] == UINT16_MAX) {
+                    break; // END REACHED
+                }
+                char buffer2[8];
+                char buffer3[8];
+                sprintf(buffer2, "%d", _obstacle_distance.distances[i]);
+                sprintf(buffer3, "%-3s", buffer2);
+                strcat(buffer, buffer3);
+            }
+
+            PX4_INFO(buffer);
+        } else {
+            _resultantObjectAvoidanceThrust(0) = 0.f;
+            _resultantObjectAvoidanceThrust(1) = 0.f;
+        }
     }
 }
 
@@ -619,12 +691,8 @@ MulticopterPositionControl::task_main()
             /**** OBJECT AVOIDANCE ****/
 
 
-            // TODO if _obstacle_distance ~ .isValid()
-
-
-
             //_obstacle_distance
-            //_control.updateObjectAvoidanceThrust();
+            _control.updateObjectAvoidanceThrust(_resultantObjectAvoidanceThrust);
 
             /**** OBJECT AVOIDANCE END ****/
 

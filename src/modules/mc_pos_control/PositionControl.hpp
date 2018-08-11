@@ -63,7 +63,7 @@ struct PositionControlStates {
  * 	Output
  * 		thrust vector and a yaw-setpoint
  *
- * 	If there is a position and a velocity set-point present, then
+ * 	If there is a position and a vecity set-point present, then
  * 	the velocity set-point is used as feed-forward. If feed-forward is
  * 	active, then the velocity component of the P-controller output has
  * 	priority over the feed-forward component.
