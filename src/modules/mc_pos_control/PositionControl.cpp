@@ -302,8 +302,8 @@ void PositionControl::_velocityController(const float &dt)
         // i.e. _thr_sp(0) = thrust_desired_NE(1) + f_objavoidance * sin(theta)
 
 		// Saturate thrust in NE-direction.
-        _thr_sp(0) = thrust_desired_NE(0);
-        _thr_sp(1) = thrust_desired_NE(1);
+        _thr_sp(0) = thrust_desired_NE(0) + _objectAvoidanceThrustInNEframe(0);
+        _thr_sp(1) = thrust_desired_NE(1) + _objectAvoidanceThrustInNEframe(1);
 
         // norm(thrust_desired_NE) > norm(thrust_max)
         // operator * --> DOT PRODUCT
@@ -370,7 +370,12 @@ void PositionControl::updateConstraints(const vehicle_constraints_s &constraints
 
 	if (!PX4_ISFINITE(constraints.speed_xy) || !(constraints.speed_xy < MPC_XY_VEL_MAX.get())) {
 		_constraints.speed_xy = MPC_XY_VEL_MAX.get();
-	}
+    }
+}
+
+void PositionControl::updateObjectAvoidanceThrust(const Vector2f &forceInNEframe)
+{
+    _objectAvoidanceThrustInNEframe = forceInNEframe;
 }
 
 void PositionControl::updateParams()

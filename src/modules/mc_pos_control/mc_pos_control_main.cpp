@@ -57,6 +57,7 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
+#include <uORB/topics/obstacle_distance.h>
 
 #include <float.h>
 #include <mathlib/mathlib.h>
@@ -111,6 +112,7 @@ private:
 	int		_params_sub{-1};			/**< notification of parameter updates */
 	int		_local_pos_sub{-1};			/**< vehicle local position */
 	int		_home_pos_sub{-1}; 			/**< home position */
+    int     _obstacle_distance_sub{-1}; /**< obstacle distance subscription */
 
 	float _takeoff_speed = -1.f; /**< For flighttask interface used only. It can be thrust or velocity setpoints */
 
@@ -121,6 +123,7 @@ private:
 	vehicle_local_position_s			_local_pos{};		/**< vehicle local position */
 	vehicle_local_position_setpoint_s	_local_pos_sp{};		/**< vehicle local position setpoint */
 	home_position_s				_home_pos{}; 				/**< home position */
+    obstacle_distance_s         _obstacle_distance{};       /**< obstacle distance */
 
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::MPC_TKO_RAMP_T>) _takeoff_ramp_time, /**< time constant for smooth takeoff ramp */
@@ -365,6 +368,12 @@ MulticopterPositionControl::poll_subscriptions()
 	if (updated) {
 		orb_copy(ORB_ID(home_position), _home_pos_sub, &_home_pos);
 	}
+
+    orb_check(_obstacle_distance_sub, &updated);
+
+    if (updated) {
+        orb_copy(ORB_ID(obstacle_distance), _obstacle_distance_sub, &_obstacle_distance);
+    }
 }
 
 int
@@ -479,6 +488,7 @@ MulticopterPositionControl::task_main()
 	_params_sub = orb_subscribe(ORB_ID(parameter_update));
 	_local_pos_sub = orb_subscribe(ORB_ID(vehicle_local_position));
 	_home_pos_sub = orb_subscribe(ORB_ID(home_position));
+    _obstacle_distance_sub = orb_subscribe(ORB_ID(obstacle_distance));
 
 	parameters_update(true);
 
@@ -604,6 +614,21 @@ MulticopterPositionControl::task_main()
 			if (PX4_ISFINITE(_states.position(2))) {
 				limit_altitude(setpoint);
 			}
+
+
+            /**** OBJECT AVOIDANCE ****/
+
+
+            // TODO if _obstacle_distance ~ .isValid()
+
+
+
+            //_obstacle_distance
+            //_control.updateObjectAvoidanceThrust();
+
+            /**** OBJECT AVOIDANCE END ****/
+
+
 
 			// Update states, setpoints and constraints.
 			_control.updateConstraints(constraints);

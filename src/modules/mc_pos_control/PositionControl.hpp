@@ -103,6 +103,8 @@ public:
 	 */
 	void updateConstraints(const vehicle_constraints_s &constraints);
 
+    void updateObjectAvoidanceThrust(const matrix::Vector2f& forceInNEframe);
+
 	/**
 	 * Apply P-position and PID-velocity controller that updates the member
 	 * thrust, yaw- and yawspeed-setpoints.
@@ -183,6 +185,8 @@ private:
 	matrix::Vector3f _thr_int{}; /**< thrust integral term */
 	vehicle_constraints_s _constraints{}; /**< variable constraints */
 	bool _skip_controller{false}; /**< skips position/velocity controller. true for stabilized mode */
+
+    matrix::Vector2f _objectAvoidanceThrustInNEframe{};
 
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::MPC_THR_MAX>) MPC_THR_MAX,
