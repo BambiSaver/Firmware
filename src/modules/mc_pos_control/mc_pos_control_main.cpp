@@ -389,6 +389,9 @@ MulticopterPositionControl::poll_subscriptions()
         // do SUM in double, to avoid possible overflows
         // NE
 
+
+#ifdef OBSTACLE_AVOIDANCE
+
         float objectAvoidanceThrustMagnitude = 0.f;
         float objectAvoidanceThrustAngleInRad = 0.f;
         int numberOfSummedAngles = 0;
@@ -491,6 +494,65 @@ MulticopterPositionControl::poll_subscriptions()
             float mag = _resultantObjectAvoidanceThrust.length();
             _resultantObjectAvoidanceThrust(0) = _resultantObjectAvoidanceThrust(0) / mag * 2;
             _resultantObjectAvoidanceThrust(1) = _resultantObjectAvoidanceThrust(1) / mag * 2;
+        }
+
+#endif
+
+
+        int numberOfSummedAngles = 0;
+        float segmentWidthInRad = math::radians((float)_obstacle_distance.increment);
+        float obstacleLocalN = 0.f;
+        float obstacleLocalE = 0.f;
+        float objectAvoidanceThrustMagnitude = 0.f;
+
+        for (int i = 0; i < 72; ++i) {
+            if (_obstacle_distance.distances[i] == UINT16_MAX) {
+                break; // END REACHED
+            }
+
+            if (_obstacle_distance.distances[i] <= _obstacle_distance.min_distance ||
+                    _obstacle_distance.distances[i] >= _obstacle_distance.max_distance) {
+                // skip invalid element
+                continue;
+            }
+
+            // VALID SEGMENT
+            ++numberOfSummedAngles;
+
+            obstacleLocalE += sinf(i*segmentWidthInRad);
+            obstacleLocalN += -cosf(i*segmentWidthInRad);
+
+
+            objectAvoidanceThrustMagnitude += 1.f * (300.f - _obstacle_distance.min_distance) /
+                    (_obstacle_distance.distances[i] - _obstacle_distance.min_distance);
+        }
+
+        const float OBJECT_AVOIDANCE_THRUST_GAIN = 1.f;
+
+        if (numberOfSummedAngles > 0) {
+            float obstacleAngleLocalNE = static_cast<float>(M_PI)/2.f - atan2(obstacleLocalN, obstacleLocalE);
+            float obstacleAngleGlobalNE = fmod((_states.yaw + obstacleAngleLocalNE), 2*static_cast<float>(M_PI));
+
+            objectAvoidanceThrustMagnitude *= OBJECT_AVOIDANCE_THRUST_GAIN / numberOfSummedAngles;
+
+
+            char buffer[1024];
+            sprintf(buffer, "YAW:%5.f° OBSTACLE AT: (%5.2f, %5.2f) %5.f° --> in NED ref system: %5.f°",
+                    static_cast<double>(math::degrees(_states.yaw)),
+                    static_cast<double>(obstacleLocalN),
+                    static_cast<double>(obstacleLocalE),
+                    static_cast<double>(math::degrees(obstacleAngleLocalNE)),
+                    static_cast<double>(math::degrees(obstacleAngleGlobalNE)));
+
+
+            _resultantObjectAvoidanceThrust(0) = -cosf(obstacleAngleGlobalNE) * objectAvoidanceThrustMagnitude;
+            _resultantObjectAvoidanceThrust(1) = -sinf(obstacleAngleGlobalNE) * objectAvoidanceThrustMagnitude;
+
+
+            PX4_INFO(buffer);
+        } else {
+            _resultantObjectAvoidanceThrust(0) = 0;
+            _resultantObjectAvoidanceThrust(1) = 0;
         }
     }
 }
@@ -744,7 +806,6 @@ MulticopterPositionControl::task_main()
             /**** OBJECT AVOIDANCE END ****/
 
 
-
 			// Update states, setpoints and constraints.
 			_control.updateConstraints(constraints);
 			_control.updateState(_states);
@@ -755,16 +816,16 @@ MulticopterPositionControl::task_main()
 
             matrix::Vector3f thr_sp = _control.getThrustSetpoint();
 
-            auto afterCorrection_N = thr_sp(0) + _resultantObjectAvoidanceThrust(0);
-            auto afterCorrection_E = thr_sp(1) + _resultantObjectAvoidanceThrust(1);
+//            auto afterCorrection_N = thr_sp(0) + _resultantObjectAvoidanceThrust(0);
+//            auto afterCorrection_E = thr_sp(1) + _resultantObjectAvoidanceThrust(1);
 
-            PX4_INFO("THRUST_SP (%.3f, %.3f) + OBJECT AVOIDANCE (%.3f, %.3f) --> (%.3f, %.3f)",
-                     static_cast<double>(thr_sp(0)), static_cast<double>(thr_sp(1)),
-                     static_cast<double>(_resultantObjectAvoidanceThrust(0)), static_cast<double>(_resultantObjectAvoidanceThrust(1)),
-                     static_cast<double>(afterCorrection_N), static_cast<double>(afterCorrection_E));
+//            PX4_INFO("THRUST_SP (%.3f, %.3f) + OBJECT AVOIDANCE (%.3f, %.3f) --> (%.3f, %.3f)",
+//                     static_cast<double>(thr_sp(0)), static_cast<double>(thr_sp(1)),
+//                     static_cast<double>(_resultantObjectAvoidanceThrust(0)), static_cast<double>(_resultantObjectAvoidanceThrust(1)),
+//                     static_cast<double>(afterCorrection_N), static_cast<double>(afterCorrection_E));
 
-            thr_sp(0) = afterCorrection_N;
-            thr_sp(1) = afterCorrection_E;
+//            thr_sp(0) = afterCorrection_N;
+//            thr_sp(1) = afterCorrection_E;
 
 			// Adjust thrust setpoint based on landdetector only if the
 			// vehicle is NOT in pure Manual mode and NOT in smooth takeoff
@@ -785,10 +846,21 @@ MulticopterPositionControl::task_main()
 			_local_pos_sp.vz = _control.getVelSp()(2);
 			thr_sp.copyTo(_local_pos_sp.thrust);
 
+            thr_sp(0) += _resultantObjectAvoidanceThrust(0);
+            thr_sp(0) += _resultantObjectAvoidanceThrust(1);
+
+
+//            // rotate around slowly
+//            setpoint.yaw += 0.01f;
+//            setpoint.yawspeed = 0.01f / _dt;
+//            if (setpoint.yaw > 2*static_cast<float>(M_PI)) {
+//                setpoint.yaw = 0.f;
+//            }
+
 			// Fill attitude setpoint. Attitude is computed from yaw and thrust setpoint.
-			_att_sp = ControlMath::thrustToAttitude(thr_sp, _control.getYawSetpoint());
-			_att_sp.yaw_sp_move_rate = _control.getYawspeedSetpoint();
-			_att_sp.fw_control_yaw = false;
+            _att_sp = ControlMath::thrustToAttitude(thr_sp, _control.getYawSetpoint());
+            _att_sp.yaw_sp_move_rate = _control.getYawspeedSetpoint();
+            _att_sp.fw_control_yaw = false;
 			_att_sp.disable_mc_yaw_control = false;
 			_att_sp.apply_flaps = false;
 
