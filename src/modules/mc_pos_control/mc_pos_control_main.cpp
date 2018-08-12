@@ -62,6 +62,7 @@
 #include <float.h>
 #include <mathlib/mathlib.h>
 #include <stdio.h>
+#include <limits>
 
 #include <controllib/blocks.hpp>
 
@@ -125,7 +126,11 @@ private:
 	home_position_s				_home_pos{}; 				/**< home position */
     obstacle_distance_s         _obstacle_distance{};       /**< obstacle distance */
 
+
+
+    float _objectAvoidanceThrustPreviousAngleInRad;
     matrix::Vector2f _resultantObjectAvoidanceThrust;
+    matrix::Vector2f _resultantObjectAvoidanceThrustIntegral;
 
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::MPC_TKO_RAMP_T>) _takeoff_ramp_time, /**< time constant for smooth takeoff ramp */
@@ -253,10 +258,11 @@ MulticopterPositionControl	*g_control;
 MulticopterPositionControl::MulticopterPositionControl() :
 	SuperBlock(nullptr, "MPC"),
 	ModuleParams(nullptr),
+    _objectAvoidanceThrustPreviousAngleInRad(std::numeric_limits<float>::quiet_NaN()),
 	_vel_x_deriv(this, "VELD"),
 	_vel_y_deriv(this, "VELD"),
-	_vel_z_deriv(this, "VELD"),
-	_control(this)
+    _vel_z_deriv(this, "VELD"),
+    _control(this)
 {
 	// fetch initial parameter values
 	parameters_update(true);
@@ -383,12 +389,10 @@ MulticopterPositionControl::poll_subscriptions()
         // do SUM in double, to avoid possible overflows
         // NE
 
-        _resultantObjectAvoidanceThrust(0) = 0.f;
-        _resultantObjectAvoidanceThrust(1) = 0.f;
-        float summedAngleOfValidSegmentsInRad = 0.f;
-
+        float objectAvoidanceThrustMagnitude = 0.f;
+        float objectAvoidanceThrustAngleInRad = 0.f;
+        int numberOfSummedAngles = 0;
         float segmentWidthInRad = math::radians((float)_obstacle_distance.increment);
-
 
 
         for (int i = 0; i < 72; ++i) {
@@ -397,38 +401,75 @@ MulticopterPositionControl::poll_subscriptions()
             }
 
             if (_obstacle_distance.distances[i] <= _obstacle_distance.min_distance ||
-                    _obstacle_distance.distances[i] <= 40 || // QUICK FIX
                     _obstacle_distance.distances[i] >= _obstacle_distance.max_distance) {
                 // skip invalid element
                 continue;
             }
 
             // VALID SEGMENT
-            summedAngleOfValidSegmentsInRad += segmentWidthInRad;
+            ++numberOfSummedAngles;
+            objectAvoidanceThrustAngleInRad += i*segmentWidthInRad;
+            objectAvoidanceThrustMagnitude += 1.f * (300.f - _obstacle_distance.min_distance) /
+                    (_obstacle_distance.distances[i] - _obstacle_distance.min_distance);
 
 //            _resultantObjectAvoidanceThrust(0) += -cosf(_states.yaw + i*segmentWidthInRad) * (_obstacle_distance.max_distance - _obstacle_distance.distances[i]) * segmentWidthInRad;
 //            _resultantObjectAvoidanceThrust(1) += -sinf(_states.yaw + i*segmentWidthInRad) * (_obstacle_distance.max_distance - _obstacle_distance.distances[i]) * segmentWidthInRad;
-            _resultantObjectAvoidanceThrust(0) += 100000.f * -cosf(_states.yaw + i*segmentWidthInRad) / _obstacle_distance.distances[i] * segmentWidthInRad;
-            _resultantObjectAvoidanceThrust(1) += 100000.f * sinf(_states.yaw + i*segmentWidthInRad) / _obstacle_distance.distances[i] * segmentWidthInRad;
         }
 
 
-        const float OBJECT_AVOIDANCE_THRUST_GAIN = 1.5f / (_obstacle_distance.max_distance);
+        // for debug output
+        char buffer[1024];
+        const float OBJECT_AVOIDANCE_THRUST_GAIN = 1.f;
 
-        if (summedAngleOfValidSegmentsInRad >= segmentWidthInRad) {
-            _resultantObjectAvoidanceThrust(0) *= OBJECT_AVOIDANCE_THRUST_GAIN / summedAngleOfValidSegmentsInRad;
-            _resultantObjectAvoidanceThrust(1) *= OBJECT_AVOIDANCE_THRUST_GAIN / summedAngleOfValidSegmentsInRad;
+        if (numberOfSummedAngles > 0) {
+            objectAvoidanceThrustAngleInRad /= numberOfSummedAngles;
+            // add yaw offset to get in local NED reference frame (not fixed to MC body)
+            objectAvoidanceThrustAngleInRad += _states.yaw;
+            objectAvoidanceThrustMagnitude *= OBJECT_AVOIDANCE_THRUST_GAIN / numberOfSummedAngles;
 
+            float angle = math::degrees(objectAvoidanceThrustAngleInRad);
 
-            float angle = atan2(-_resultantObjectAvoidanceThrust(1), -_resultantObjectAvoidanceThrust(0));
+            if (!std::isnan(_objectAvoidanceThrustPreviousAngleInRad)) {
+                // take half of the information from the previous angle
+                objectAvoidanceThrustAngleInRad /=2;
+                objectAvoidanceThrustAngleInRad += _objectAvoidanceThrustPreviousAngleInRad / 2;
+            }
 
-            angle = math::degrees(angle);
+            // save smoothed angle as previous one
+            _objectAvoidanceThrustPreviousAngleInRad = objectAvoidanceThrustAngleInRad;
+            float smoothedAngle = math::degrees(objectAvoidanceThrustAngleInRad);
 
-            char buffer[1024];
-            sprintf(buffer, "OOD at %.1f, THRUST: (%.3f, %.3f), YAW: %.1f, INPUTS: ",
-                    static_cast<double>(angle), static_cast<double>(_resultantObjectAvoidanceThrust(0)), static_cast<double>(_resultantObjectAvoidanceThrust(1)),
+            _resultantObjectAvoidanceThrust(0) = objectAvoidanceThrustMagnitude * cosf(objectAvoidanceThrustAngleInRad);
+            _resultantObjectAvoidanceThrust(1) = objectAvoidanceThrustMagnitude * sinf(objectAvoidanceThrustAngleInRad);
+
+            sprintf(buffer, "@ %.f°-->%.f°, THR: %.3f (%.3f, %3.f) + (%.3f, %.3f), YAW: %.1f, INPUTS: ",
+                    static_cast<double>(angle), static_cast<double>(smoothedAngle), static_cast<double>(objectAvoidanceThrustMagnitude),
+                    static_cast<double>(_resultantObjectAvoidanceThrust(0)), static_cast<double>(_resultantObjectAvoidanceThrust(1)),
+                    static_cast<double>(_resultantObjectAvoidanceThrustIntegral(0)), static_cast<double>(_resultantObjectAvoidanceThrustIntegral(1)),
                     static_cast<double>(math::degrees(_states.yaw)));
 
+            // LOG, then INTEGRAL
+//            auto reactionWithoutIntegral = _resultantObjectAvoidanceThrust;
+//            _resultantObjectAvoidanceThrust /= 2;
+//            _resultantObjectAvoidanceThrust += _resultantObjectAvoidanceThrustIntegral / 2;
+//            _resultantObjectAvoidanceThrustIntegral += reactionWithoutIntegral;
+        } else {
+            // there is no previous angle
+            _objectAvoidanceThrustPreviousAngleInRad = std::numeric_limits<float>::quiet_NaN();
+
+            // only print debug if we have a remaining integral action
+
+            buffer[0] = '\0';
+
+//                sprintf(buffer, "NO OBSTACLE, using just integral (%.3f, %.3f), YAW: %.1f, INPUTS: ",
+//                        static_cast<double>(_resultantObjectAvoidanceThrustIntegral(0)), static_cast<double>(_resultantObjectAvoidanceThrustIntegral(1)),
+//                        static_cast<double>(math::degrees(_states.yaw)));
+
+            // use only integral term
+            _resultantObjectAvoidanceThrust = _resultantObjectAvoidanceThrustIntegral;
+        }
+
+        if (strcmp(buffer, "")) {
             for (int i = 0; i < 72; ++i) {
                 if (_obstacle_distance.distances[i] == UINT16_MAX) {
                     break; // END REACHED
@@ -441,9 +482,15 @@ MulticopterPositionControl::poll_subscriptions()
             }
 
             PX4_INFO(buffer);
-        } else {
-            _resultantObjectAvoidanceThrust(0) = 0.f;
-            _resultantObjectAvoidanceThrust(1) = 0.f;
+        }
+
+        _resultantObjectAvoidanceThrustIntegral *= 0.8f;
+
+        // saturate
+        if (_resultantObjectAvoidanceThrust*_resultantObjectAvoidanceThrust > 4) {
+            float mag = _resultantObjectAvoidanceThrust.length();
+            _resultantObjectAvoidanceThrust(0) = _resultantObjectAvoidanceThrust(0) / mag * 2;
+            _resultantObjectAvoidanceThrust(1) = _resultantObjectAvoidanceThrust(1) / mag * 2;
         }
     }
 }
@@ -692,7 +739,7 @@ MulticopterPositionControl::task_main()
 
 
             //_obstacle_distance
-            _control.updateObjectAvoidanceThrust(_resultantObjectAvoidanceThrust);
+            //_control.updateObjectAvoidanceThrust(_resultantObjectAvoidanceThrust);
 
             /**** OBJECT AVOIDANCE END ****/
 
@@ -706,7 +753,18 @@ MulticopterPositionControl::task_main()
 			// Generate desired thrust and yaw.
 			_control.generateThrustYawSetpoint(_dt);
 
-			matrix::Vector3f thr_sp = _control.getThrustSetpoint();
+            matrix::Vector3f thr_sp = _control.getThrustSetpoint();
+
+            auto afterCorrection_N = thr_sp(0) + _resultantObjectAvoidanceThrust(0);
+            auto afterCorrection_E = thr_sp(1) + _resultantObjectAvoidanceThrust(1);
+
+            PX4_INFO("THRUST_SP (%.3f, %.3f) + OBJECT AVOIDANCE (%.3f, %.3f) --> (%.3f, %.3f)",
+                     static_cast<double>(thr_sp(0)), static_cast<double>(thr_sp(1)),
+                     static_cast<double>(_resultantObjectAvoidanceThrust(0)), static_cast<double>(_resultantObjectAvoidanceThrust(1)),
+                     static_cast<double>(afterCorrection_N), static_cast<double>(afterCorrection_E));
+
+            thr_sp(0) = afterCorrection_N;
+            thr_sp(1) = afterCorrection_E;
 
 			// Adjust thrust setpoint based on landdetector only if the
 			// vehicle is NOT in pure Manual mode and NOT in smooth takeoff
@@ -1091,3 +1149,4 @@ int mc_pos_control_main(int argc, char *argv[])
 	warnx("unrecognized command");
 	return 1;
 }
+
