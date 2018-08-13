@@ -402,12 +402,18 @@ MulticopterPositionControl::poll_subscriptions()
             // VALID SEGMENT
             ++numberOfSummedAngles;
 
-            obstacleLocalE += sinf(i*segmentWidthInRad);
-            obstacleLocalN += -cosf(i*segmentWidthInRad);
-
+            float weight = 1.f * (300.f - _obstacle_distance.min_distance) /
+                    (_obstacle_distance.distances[i] - _obstacle_distance.min_distance);
 
             objectAvoidanceThrustMagnitude += 1.f * (300.f - _obstacle_distance.min_distance) /
                     (_obstacle_distance.distances[i] - _obstacle_distance.min_distance);
+
+
+            // TODO let the nearest distance count more for the angle? IS THIS CORRECT?
+            obstacleLocalE += weight * sinf(i*segmentWidthInRad);
+            obstacleLocalN += weight * -cosf(i*segmentWidthInRad);
+
+
         }
 
         const float OBJECT_AVOIDANCE_THRUST_GAIN = .8f;
@@ -443,17 +449,19 @@ MulticopterPositionControl::poll_subscriptions()
         auto filteredN = _lpFilterObjectAvoidance.apply(_resultantObjectAvoidanceThrust(0));
         auto filteredE = _lpFilterObjectAvoidance.apply(_resultantObjectAvoidanceThrust(1));
 
+        // print values only if they are non-zero
+        if (fabs(filteredN) > 0.0001f || fabs(filteredE) > 0.0001f) {
+            sprintf(buffer, "OBJECT AVOIDANCE THRUST: (%7.3f, %7.3f) --> (%7.3f, %7.3f)",
+                    static_cast<double>(_resultantObjectAvoidanceThrust(0)),
+                    static_cast<double>(_resultantObjectAvoidanceThrust(1)),
+                    static_cast<double>(filteredN),
+                    static_cast<double>(filteredE));
 
-        sprintf(buffer, "OBJECT AVOIDANCE THRUST: (%7.3f, %7.3f) --> (%7.3f, %7.3f)",
-                static_cast<double>(_resultantObjectAvoidanceThrust(0)),
-                static_cast<double>(_resultantObjectAvoidanceThrust(1)),
-                static_cast<double>(filteredN),
-                static_cast<double>(filteredE));
+            PX4_INFO(buffer);
+        }
 
         _resultantObjectAvoidanceThrust(0) = filteredN;
         _resultantObjectAvoidanceThrust(1) = filteredE;
-
-        PX4_INFO(buffer);
     }
 }
 
