@@ -256,7 +256,7 @@ MulticopterPositionControl	*g_control;
 MulticopterPositionControl::MulticopterPositionControl() :
 	SuperBlock(nullptr, "MPC"),
     ModuleParams(nullptr),
-    _lpFilterObjectAvoidance(5.f, 1E6),
+    _lpFilterObjectAvoidance(5.f, 1E6), // TODO make 5Hz dynamically settable
 	_vel_x_deriv(this, "VELD"),
 	_vel_y_deriv(this, "VELD"),
     _vel_z_deriv(this, "VELD"),
