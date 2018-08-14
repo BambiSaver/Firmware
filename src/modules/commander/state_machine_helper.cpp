@@ -346,7 +346,9 @@ main_state_transition(const vehicle_status_s &status, const main_state_t new_mai
 		if (!status_flags.offboard_control_signal_lost) {
 
 			ret = TRANSITION_CHANGED;
-		}
+        } else {
+            PX4_INFO("I don't change state to OFFBOARD, because status_flags.offboard_control_signal_lost is true");
+        }
 
 		break;
 
