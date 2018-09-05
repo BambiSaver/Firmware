@@ -63,7 +63,7 @@ struct PositionControlStates {
  * 	Output
  * 		thrust vector and a yaw-setpoint
  *
- * 	If there is a position and a vecity set-point present, then
+ * 	If there is a position and a velocity set-point present, then
  * 	the velocity set-point is used as feed-forward. If feed-forward is
  * 	active, then the velocity component of the P-controller output has
  * 	priority over the feed-forward component.
@@ -102,8 +102,6 @@ public:
 	 * @param constraints a PositionControl structure with supported constraints
 	 */
 	void updateConstraints(const vehicle_constraints_s &constraints);
-
-    void updateObjectAvoidanceThrust(const matrix::Vector2f& forceInNEframe);
 
 	/**
 	 * Apply P-position and PID-velocity controller that updates the member
@@ -185,8 +183,6 @@ private:
 	matrix::Vector3f _thr_int{}; /**< thrust integral term */
 	vehicle_constraints_s _constraints{}; /**< variable constraints */
 	bool _skip_controller{false}; /**< skips position/velocity controller. true for stabilized mode */
-
-    matrix::Vector2f _objectAvoidanceThrustInNEframe{};
 
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::MPC_THR_MAX>) MPC_THR_MAX,
