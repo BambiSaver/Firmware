@@ -56,6 +56,7 @@
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_local_position_setpoint.h>
+#include <uORB/topics/vehicle_collision_avoidance_thrust.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/obstacle_distance.h>
 
@@ -69,6 +70,9 @@
 #include <lib/FlightTasks/FlightTasks.hpp>
 #include "PositionControl.hpp"
 #include "Utility/ControlMath.hpp"
+
+#define ENABLE_BAMBI_OBJECT_AVOIDANCE
+//#define ENABLE_BAMBI_OBJECT_AVOIDANCE_LP_FILTER
 
 /**
  * Multicopter position control app start / stop handling function
@@ -104,6 +108,7 @@ private:
 
 	orb_advert_t	_att_sp_pub{nullptr};			/**< attitude setpoint publication */
 	orb_advert_t	_local_pos_sp_pub{nullptr};		/**< vehicle local position setpoint publication */
+    orb_advert_t	_collision_avoidance_pub{nullptr};		/**< vehicle local position setpoint publication */
 	orb_id_t _attitude_setpoint_id{nullptr};
 
 	int		_control_task{-1};			/**< task handle for task */
@@ -123,14 +128,17 @@ private:
 	vehicle_control_mode_s			_control_mode{};		/**< vehicle control mode */
 	vehicle_local_position_s			_local_pos{};		/**< vehicle local position */
 	vehicle_local_position_setpoint_s	_local_pos_sp{};		/**< vehicle local position setpoint */
+    vehicle_collision_avoidance_thrust_s _collision_avoidance_thrust; /**< vehicle collision avoidance thrust for logging */
 	home_position_s				_home_pos{}; 				/**< home position */
     obstacle_distance_s         _obstacle_distance{};       /**< obstacle distance */
 
 
     matrix::Vector2f _resultantObjectAvoidanceThrust;
     math::LowPassFilter2p _lpFilterObjectAvoidance;
+    float _lastCollisionAvoidanceAngle;
 
 	DEFINE_PARAMETERS(
+        (ParamFloat<px4::params::MPC_THR_MAX>) MPC_THR_MAX,
 		(ParamFloat<px4::params::MPC_TKO_RAMP_T>) _takeoff_ramp_time, /**< time constant for smooth takeoff ramp */
 		(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _vel_max_up,
 		(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _vel_max_down,
@@ -201,6 +209,12 @@ private:
 	 */
 	void publish_local_pos_sp();
 
+    /**
+     * Publish collission avoidance thrust
+     * This is only required for logging.
+     */
+    void publish_collission_avoidance_thrust();
+
 	/**
 	 * Checks if smooth takeoff is initiated.
 	 * @param position_setpoint_z the position setpoint in the z-Direction
@@ -256,13 +270,13 @@ MulticopterPositionControl	*g_control;
 MulticopterPositionControl::MulticopterPositionControl() :
 	SuperBlock(nullptr, "MPC"),
     ModuleParams(nullptr),
-    _lpFilterObjectAvoidance(5.f, 1E6), // TODO make 5Hz dynamically settable
+    _lpFilterObjectAvoidance(5.f, 1E7), // TODO make 5Hz dynamically settable
 	_vel_x_deriv(this, "VELD"),
 	_vel_y_deriv(this, "VELD"),
     _vel_z_deriv(this, "VELD"),
     _control(this)
 {
-	// fetch initial parameter values
+    // fetch initial parameter values
 	parameters_update(true);
 }
 
@@ -375,6 +389,8 @@ MulticopterPositionControl::poll_subscriptions()
 		orb_copy(ORB_ID(home_position), _home_pos_sub, &_home_pos);
 	}
 
+#ifdef ENABLE_BAMBI_OBJECT_AVOIDANCE
+
     orb_check(_obstacle_distance_sub, &updated);
 
     if (updated) {
@@ -387,6 +403,7 @@ MulticopterPositionControl::poll_subscriptions()
         float obstacleLocalN = 0.f;
         float obstacleLocalE = 0.f;
         float objectAvoidanceThrustMagnitude = 0.f;
+        _collision_avoidance_thrust.lowest_obstacle_distance = static_cast<float>(_obstacle_distance.max_distance);
 
         for (int i = 0; i < 72; ++i) {
             if (_obstacle_distance.distances[i] == UINT16_MAX) {
@@ -402,67 +419,49 @@ MulticopterPositionControl::poll_subscriptions()
             // VALID SEGMENT
             ++numberOfSummedAngles;
 
-            float weight = 1.f * (300.f - _obstacle_distance.min_distance) /
-                    (_obstacle_distance.distances[i] - _obstacle_distance.min_distance);
+            float weight = -1.f + _obstacle_distance.max_distance / _obstacle_distance.distances[i];
 
-            objectAvoidanceThrustMagnitude += 1.f * (300.f - _obstacle_distance.min_distance) /
-                    (_obstacle_distance.distances[i] - _obstacle_distance.min_distance);
+            if (_collision_avoidance_thrust.lowest_obstacle_distance > static_cast<float>(_obstacle_distance.distances[i])) {
+                _collision_avoidance_thrust.lowest_obstacle_distance = static_cast<float>(_obstacle_distance.distances[i]);
+            }
+            //objectAvoidanceThrustMagnitude += weight;
 
 
-            // TODO let the nearest distance count more for the angle? IS THIS CORRECT?
             obstacleLocalE += weight * sinf(i*segmentWidthInRad);
             obstacleLocalN += weight * -cosf(i*segmentWidthInRad);
-
-
         }
 
-        const float OBJECT_AVOIDANCE_THRUST_GAIN = .8f;
 
-        char buffer[1024];
+#ifdef ENABLE_BAMBI_OBJECT_AVOIDANCE_LP_FILTER
+        _collision_avoidance_thrust.lowest_obstacle_distance_filtered =
+                _lpFilterObjectAvoidance.apply(_collision_avoidance_thrust.lowest_obstacle_distance);
+#else
+        _collision_avoidance_thrust.lowest_obstacle_distance_filtered = _collision_avoidance_thrust.lowest_obstacle_distance;
+#endif
+
+        //_states.velocity(0)
+        //_states.velocity(1)
+
+        const float OBJECT_AVOIDANCE_THRUST_GAIN = .5f;
 
         if (numberOfSummedAngles > 0) {
             float obstacleAngleLocalNE = static_cast<float>(M_PI)/2.f - atan2(obstacleLocalN, obstacleLocalE);
             float obstacleAngleGlobalNE = fmod((_states.yaw + obstacleAngleLocalNE), 2*static_cast<float>(M_PI));
 
-            objectAvoidanceThrustMagnitude *= OBJECT_AVOIDANCE_THRUST_GAIN / numberOfSummedAngles;
-
-
-            sprintf(buffer, "OBJECT AVOIDANCE THRUST: (%7.3f, %7.3f",
-                    static_cast<double>(_resultantObjectAvoidanceThrust(0)),
-                    static_cast<double>(_resultantObjectAvoidanceThrust(1)));
-
-            PX4_INFO(buffer);
-//            sprintf(buffer, "YAW:%5.f° OBSTACLE AT: (%5.2f, %5.2f) %5.f° --> in NED ref system: %5.f°",
-//                    static_cast<double>(math::degrees(_states.yaw)),
-//                    static_cast<double>(obstacleLocalN),
-//                    static_cast<double>(obstacleLocalE),
-//                    static_cast<double>(math::degrees(obstacleAngleLocalNE)),
-//                    static_cast<double>(math::degrees(obstacleAngleGlobalNE)));
-
-            _resultantObjectAvoidanceThrust(0) = -cosf(obstacleAngleGlobalNE) * objectAvoidanceThrustMagnitude;
-            _resultantObjectAvoidanceThrust(1) = -sinf(obstacleAngleGlobalNE) * objectAvoidanceThrustMagnitude;
-
-        } else {
-            _resultantObjectAvoidanceThrust(0) = 0.f;
-            _resultantObjectAvoidanceThrust(1) = 0.f;
-        }
-        auto filteredN = _lpFilterObjectAvoidance.apply(_resultantObjectAvoidanceThrust(0));
-        auto filteredE = _lpFilterObjectAvoidance.apply(_resultantObjectAvoidanceThrust(1));
-
-        // print values only if they are non-zero
-        if (fabs(filteredN) > 0.0001f || fabs(filteredE) > 0.0001f) {
-            sprintf(buffer, "OBJECT AVOIDANCE THRUST: (%7.3f, %7.3f) --> (%7.3f, %7.3f)",
-                    static_cast<double>(_resultantObjectAvoidanceThrust(0)),
-                    static_cast<double>(_resultantObjectAvoidanceThrust(1)),
-                    static_cast<double>(filteredN),
-                    static_cast<double>(filteredE));
-
-            PX4_INFO(buffer);
+            _lastCollisionAvoidanceAngle = obstacleAngleGlobalNE;
         }
 
-        _resultantObjectAvoidanceThrust(0) = filteredN;
-        _resultantObjectAvoidanceThrust(1) = filteredE;
+        float weight = -1.f + _obstacle_distance.max_distance / _collision_avoidance_thrust.lowest_obstacle_distance_filtered;
+
+        weight = std::fmax(weight, 0.f);
+
+        objectAvoidanceThrustMagnitude = OBJECT_AVOIDANCE_THRUST_GAIN * weight;
+
+        _resultantObjectAvoidanceThrust(0) = -cosf(_lastCollisionAvoidanceAngle) * objectAvoidanceThrustMagnitude;
+        _resultantObjectAvoidanceThrust(1) = -sinf(_lastCollisionAvoidanceAngle) * objectAvoidanceThrustMagnitude;
     }
+
+#endif
 }
 
 int
@@ -717,15 +716,42 @@ MulticopterPositionControl::task_main()
 
             matrix::Vector3f thr_sp = _control.getThrustSetpoint();
 
-            /**** OBJECT AVOIDANCE ****/
+#ifdef ENABLE_BAMBI_OBJECT_AVOIDANCE
 
             // INJECT OBJECT AVOIDANCE THRUST FROM POTENTIAL FIELD
-            thr_sp(0) += _resultantObjectAvoidanceThrust(0);
-            thr_sp(1) += _resultantObjectAvoidanceThrust(1);
+            //thr_sp(0) += _resultantObjectAvoidanceThrust(0);
+            //thr_sp(1) += _resultantObjectAvoidanceThrust(1);
 
-            /**** OBJECT AVOIDANCE END ****/
+            _collision_avoidance_thrust.colission_avoidance_thrust_x = _resultantObjectAvoidanceThrust(0);
+            _collision_avoidance_thrust.colission_avoidance_thrust_y = _resultantObjectAvoidanceThrust(1);
 
+            _collision_avoidance_thrust.desired_thrust[0] = thr_sp(0);
+            _collision_avoidance_thrust.desired_thrust[1] = thr_sp(1);
+            _collision_avoidance_thrust.desired_thrust[2] = thr_sp(2);
 
+            Vector2f thrust_desired_NE;
+            thrust_desired_NE(0) = thr_sp(0) + _resultantObjectAvoidanceThrust(0);
+            thrust_desired_NE(1) = thr_sp(1) + _resultantObjectAvoidanceThrust(1);
+
+            float thrust_max_NE_tilt = fabsf(thr_sp(2)) * tanf(constraints.tilt);
+            float thrust_max_NE = sqrtf(MPC_THR_MAX.get() * MPC_THR_MAX.get() - thr_sp(2) * thr_sp(2));
+            thrust_max_NE = math::min(thrust_max_NE_tilt, thrust_max_NE);
+
+            // Saturate thrust in NE-direction.
+            thr_sp(0) = thrust_desired_NE(0);
+            thr_sp(1) = thrust_desired_NE(1);
+
+            if (thrust_desired_NE * thrust_desired_NE > thrust_max_NE * thrust_max_NE) {
+                float mag = thrust_desired_NE.length();
+                thr_sp(0) = thrust_desired_NE(0) / mag * thrust_max_NE;
+                thr_sp(1) = thrust_desired_NE(1) / mag * thrust_max_NE;
+            }
+
+            _collision_avoidance_thrust.thrust_setpoint_x = thr_sp(0);
+            _collision_avoidance_thrust.thrust_setpoint_y = thr_sp(1);
+
+            publish_collission_avoidance_thrust();
+#endif
 
 			// Adjust thrust setpoint based on landdetector only if the
 			// vehicle is NOT in pure Manual mode and NOT in smooth takeoff
@@ -1041,6 +1067,25 @@ MulticopterPositionControl::publish_local_pos_sp()
 					    ORB_ID(vehicle_local_position_setpoint),
 					    &_local_pos_sp);
 	}
+}
+
+
+void
+MulticopterPositionControl::publish_collission_avoidance_thrust()
+{
+
+    _collision_avoidance_thrust.timestamp = hrt_absolute_time();
+
+    // publish local position setpoint
+    if (_collision_avoidance_pub != nullptr) {
+        orb_publish(ORB_ID(vehicle_collision_avoidance_thrust),
+                _collision_avoidance_pub, &_collision_avoidance_thrust);
+
+    } else {
+        _collision_avoidance_pub = orb_advertise(
+                        ORB_ID(vehicle_collision_avoidance_thrust),
+                        &_collision_avoidance_thrust);
+    }
 }
 
 int

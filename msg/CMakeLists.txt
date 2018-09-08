@@ -125,6 +125,7 @@ set(msg_files
 	vehicle_land_detected.msg
 	vehicle_local_position.msg
 	vehicle_local_position_setpoint.msg
+    vehicle_collision_avoidance_thrust.msg
 	vehicle_magnetometer.msg
 	vehicle_rates_setpoint.msg
 	vehicle_roi.msg
